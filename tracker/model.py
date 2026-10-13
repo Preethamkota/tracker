@@ -10,35 +10,39 @@ DROPOUT = 0.3
 def build_model(
     num_classes=NUM_CLASSES,
     pretrained=True,
-    freeze_backbone=True
+    freeze_backbone=True,
 ):
     # Load pretrained EfficientNet-B2
     weights = (
         models.EfficientNet_B2_Weights.DEFAULT
-        if pretrained else None
+        if pretrained
+        else None
     )
 
     model = models.efficientnet_b2(weights=weights)
 
-    # Freeze the feature extractor initially
+    # Freeze feature extractor initially
     if freeze_backbone:
         for param in model.features.parameters():
             param.requires_grad = False
 
-    # Replace the original classifier
+    # Replace original classifier with our 4-class classifier
     in_features = model.classifier[1].in_features
 
     model.classifier = nn.Sequential(
         nn.Dropout(p=DROPOUT),
-        nn.Linear(in_features, num_classes)
+        nn.Linear(in_features, num_classes),
     )
 
     return model
 
 
-def unfreeze_last_blocks(model):
-    # Fine-tune the last two feature blocks
-    for param in model.features[-2:].parameters():
+def unfreeze_last_blocks(model, num_blocks=3):
+    # Unfreeze the requested number of final feature blocks
+    for param in model.features.parameters():
+        param.requires_grad = False
+
+    for param in model.features[-num_blocks:].parameters():
         param.requires_grad = True
 
 
@@ -54,6 +58,7 @@ if __name__ == "__main__":
     dummy_input = torch.randn(2, 3, 260, 260)
 
     model.eval()
+
     with torch.no_grad():
         output = model(dummy_input)
 

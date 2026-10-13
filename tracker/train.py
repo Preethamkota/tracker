@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 
 from torch.optim import Adam
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -16,7 +18,6 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     roc_auc_score,
-
 )
 
 from data import (
@@ -39,19 +40,22 @@ SEED = 42
 NUM_CLASSES = 4
 
 PHASE1_EPOCHS = 5
-PHASE2_EPOCHS = 10
+PHASE2_EPOCHS = 15
 
 PHASE1_LR = 1e-3
-BACKBONE_LR = 1e-5
+BACKBONE_LR = 5e-6
 CLASSIFIER_LR = 1e-4
+
 WEIGHT_DECAY = 1e-4
 LABEL_SMOOTHING = 0.1
 
 PHASE1_PATIENCE = 3
-PHASE2_PATIENCE = 4
+PHASE2_PATIENCE = 5
 MIN_DELTA = 0.001
 
-CHECKPOINT_PATH = Path(__file__).resolve().parent / "best_model.pth"
+CHECKPOINT_PATH = (
+    Path(__file__).resolve().parent / "best_model.pth"
+)
 
 
 # ============================================================
@@ -76,7 +80,7 @@ if device.type == "cuda":
 
 
 # ============================================================
-# 3. VERIFY DATASET
+# 3. VERIFY DATASET AND CLASS MAPPING
 # ============================================================
 
 class_names = train_dataset.classes
@@ -100,7 +104,7 @@ print("Test samples:", len(test_dataset))
 
 
 # ============================================================
-# 4. BUILD MODEL AND LOSS FUNCTION
+# 4. BUILD MODEL AND LOSS
 # ============================================================
 
 model = build_model(
@@ -121,7 +125,7 @@ print("\nModel loaded successfully.")
 # ============================================================
 
 class EarlyStopping:
-    def __init__(self, patience=3, min_delta=0.001):
+    def __init__(self, patience=5, min_delta=0.001):
         self.patience = patience
         self.min_delta = min_delta
         self.best_score = -float("inf")
@@ -141,14 +145,16 @@ class EarlyStopping:
 # 6. TRAINING FUNCTION
 # ============================================================
 
-
 def train_one_epoch(model, loader, optimizer, phase):
     model.train()
 
+    # Phase 1: frozen backbone stays in evaluation mode.
     if phase == 1:
         model.features.eval()
+
+    # Phase 2: keep frozen early blocks in evaluation mode.
     else:
-        model.features[:-2].eval()
+        model.features[:-3].eval()
 
     total_loss = 0.0
     total_samples = 0
@@ -168,44 +174,55 @@ def train_one_epoch(model, loader, optimizer, phase):
         optimizer.step()
 
         batch_size = labels.size(0)
+
         total_loss += loss.item() * batch_size
         total_samples += batch_size
 
         predictions = logits.argmax(dim=1)
 
         all_labels.extend(labels.detach().cpu().tolist())
-        all_predictions.extend(predictions.detach().cpu().tolist())
+        all_predictions.extend(
+            predictions.detach().cpu().tolist()
+        )
 
     avg_loss = total_loss / total_samples
 
     accuracy = accuracy_score(all_labels, all_predictions)
+
     precision = precision_score(
-        all_labels, all_predictions,
-        average="macro", zero_division=0
+        all_labels,
+        all_predictions,
+        average="macro",
+        zero_division=0,
     )
+
     recall = recall_score(
-        all_labels, all_predictions,
-        average="macro", zero_division=0
+        all_labels,
+        all_predictions,
+        average="macro",
+        zero_division=0,
     )
+
     macro_f1 = f1_score(
-        all_labels, all_predictions,
-        average="macro", zero_division=0
+        all_labels,
+        all_predictions,
+        average="macro",
+        zero_division=0,
     )
 
     return avg_loss, accuracy, precision, recall, macro_f1
-
 
 
 # ============================================================
 # 7. VALIDATION FUNCTION
 # ============================================================
 
-
 def validate(model, loader):
     model.eval()
 
     total_loss = 0.0
     total_samples = 0
+
     all_labels = []
     all_predictions = []
 
@@ -218,6 +235,7 @@ def validate(model, loader):
             loss = criterion(logits, labels)
 
             batch_size = labels.size(0)
+
             total_loss += loss.item() * batch_size
             total_samples += batch_size
 
@@ -229,25 +247,33 @@ def validate(model, loader):
     avg_loss = total_loss / total_samples
 
     accuracy = accuracy_score(all_labels, all_predictions)
+
     precision = precision_score(
-        all_labels, all_predictions,
-        average="macro", zero_division=0
+        all_labels,
+        all_predictions,
+        average="macro",
+        zero_division=0,
     )
+
     recall = recall_score(
-        all_labels, all_predictions,
-        average="macro", zero_division=0
+        all_labels,
+        all_predictions,
+        average="macro",
+        zero_division=0,
     )
+
     macro_f1 = f1_score(
-        all_labels, all_predictions,
-        average="macro", zero_division=0
+        all_labels,
+        all_predictions,
+        average="macro",
+        zero_division=0,
     )
 
     return avg_loss, accuracy, precision, recall, macro_f1
 
 
-
 # ============================================================
-# 8. SAVE THE BEST CHECKPOINT ACROSS BOTH PHASES
+# 8. BEST CHECKPOINT MANAGEMENT
 # ============================================================
 
 best_val_f1 = -float("inf")
@@ -276,16 +302,52 @@ def save_best_checkpoint(model, val_f1, phase, epoch):
 
 
 # ============================================================
-# 9. PHASE 1: TRAIN CLASSIFIER ONLY
+# 9. PRINT EPOCH METRICS
+# ============================================================
+
+def print_epoch_metrics(
+    phase,
+    epoch,
+    max_epochs,
+    train_metrics,
+    val_metrics,
+    optimizer,
+):
+    train_loss, train_acc, train_p, train_r, train_f1 = (
+        train_metrics
+    )
+
+    val_loss, val_acc, val_p, val_r, val_f1 = val_metrics
+
+    print(
+        f"\nPhase {phase} | Epoch {epoch}/{max_epochs}\n"
+        f"Train | Loss: {train_loss:.4f} | "
+        f"Acc: {train_acc:.4f} | "
+        f"Precision: {train_p:.4f} | "
+        f"Recall: {train_r:.4f} | "
+        f"F1: {train_f1:.4f}\n"
+        f"Val   | Loss: {val_loss:.4f} | "
+        f"Acc: {val_acc:.4f} | "
+        f"Precision: {val_p:.4f} | "
+        f"Recall: {val_r:.4f} | "
+        f"F1: {val_f1:.4f}"
+    )
+
+    print(
+        "Learning rates:",
+        [group["lr"] for group in optimizer.param_groups],
+    )
+
+
+# ============================================================
+# 10. PHASE 1: TRAIN CLASSIFIER ONLY
 # ============================================================
 
 print("\n========== PHASE 1: FROZEN BACKBONE ==========")
 
-# Freeze the feature extractor.
 for param in model.features.parameters():
     param.requires_grad = False
 
-# Train the new classifier.
 for param in model.classifier.parameters():
     param.requires_grad = True
 
@@ -295,33 +357,42 @@ optimizer = Adam(
     weight_decay=WEIGHT_DECAY,
 )
 
+scheduler = ReduceLROnPlateau(
+    optimizer,
+    mode="max",
+    factor=0.5,
+    patience=1,
+    min_lr=1e-6,
+)
+
 early_stopping = EarlyStopping(
     patience=PHASE1_PATIENCE,
     min_delta=MIN_DELTA,
 )
 
-for epoch in range(PHASE1_EPOCHS):
-    train_loss, train_acc, train_precision, train_recall, train_f1 = (
-    train_one_epoch(model, train_loader, optimizer, phase=1)
-)
-
-    val_loss, val_acc, val_precision, val_recall, val_f1 = (
-    validate(model, val_loader)
+for epoch in range(1, PHASE1_EPOCHS + 1):
+    train_metrics = train_one_epoch(
+        model, train_loader, optimizer, phase=1
     )
 
-    print(
-    f"\nPhase 1 | Epoch {epoch + 1}/{PHASE1_EPOCHS}\n"
-    f"Train | Loss: {train_loss:.4f} | Acc: {train_acc:.4f} | "
-    f"Precision: {train_precision:.4f} | "
-    f"Recall: {train_recall:.4f} | F1: {train_f1:.4f}\n"
-    f"Val   | Loss: {val_loss:.4f} | Acc: {val_acc:.4f} | "
-    f"Precision: {val_precision:.4f} | "
-    f"Recall: {val_recall:.4f} | F1: {val_f1:.4f}"
-)
+    val_metrics = validate(model, val_loader)
+
+    val_f1 = val_metrics[4]
+
+    print_epoch_metrics(
+        phase=1,
+        epoch=epoch,
+        max_epochs=PHASE1_EPOCHS,
+        train_metrics=train_metrics,
+        val_metrics=val_metrics,
+        optimizer=optimizer,
+    )
 
     save_best_checkpoint(
-        model, val_f1, phase=1, epoch=epoch + 1
+        model, val_f1, phase=1, epoch=epoch
     )
+
+    scheduler.step(val_f1)
 
     if early_stopping.step(val_f1):
         print("Early stopping triggered in Phase 1.")
@@ -329,7 +400,7 @@ for epoch in range(PHASE1_EPOCHS):
 
 
 # ============================================================
-# 10. RESTORE BEST MODEL BEFORE PHASE 2
+# 11. RESTORE BEST MODEL BEFORE FINE-TUNING
 # ============================================================
 
 checkpoint = torch.load(
@@ -342,22 +413,22 @@ model.load_state_dict(checkpoint["model_state_dict"])
 
 print(
     "\nBest validation Macro-F1 after Phase 1:",
-    checkpoint["best_val_f1"],
+    f"{checkpoint['best_val_f1']:.4f}",
 )
 
 
 # ============================================================
-# 11. PHASE 2: FINE-TUNE LAST TWO FEATURE BLOCKS
+# 12. PHASE 2: FINE-TUNE LAST THREE FEATURE BLOCKS
 # ============================================================
 
-print("\n========== PHASE 2: FINE-TUNING ==========")
+print("\n========== PHASE 2: FINE-TUNING LAST 3 BLOCKS ==========")
 
-# Freeze every feature block first.
+# Freeze all feature blocks first.
 for param in model.features.parameters():
     param.requires_grad = False
 
-# Unfreeze the last two blocks.
-for param in model.features[-2:].parameters():
+# Unfreeze the last three blocks.
+for param in model.features[-3:].parameters():
     param.requires_grad = True
 
 # Keep the classifier trainable.
@@ -367,7 +438,7 @@ for param in model.classifier.parameters():
 optimizer = Adam(
     [
         {
-            "params": model.features[-2:].parameters(),
+            "params": model.features[-3:].parameters(),
             "lr": BACKBONE_LR,
         },
         {
@@ -378,31 +449,42 @@ optimizer = Adam(
     weight_decay=WEIGHT_DECAY,
 )
 
+scheduler = ReduceLROnPlateau(
+    optimizer,
+    mode="max",
+    factor=0.5,
+    patience=2,
+    min_lr=1e-7,
+)
+
 early_stopping = EarlyStopping(
     patience=PHASE2_PATIENCE,
     min_delta=MIN_DELTA,
 )
 
-for epoch in range(PHASE2_EPOCHS):
-    train_loss, train_acc, train_precision, train_recall, train_f1 = (
-    train_one_epoch(model, train_loader, optimizer, phase=2)
-)
+for epoch in range(1, PHASE2_EPOCHS + 1):
+    train_metrics = train_one_epoch(
+        model, train_loader, optimizer, phase=2
+    )
 
-    val_loss, val_acc, val_precision, val_recall, val_f1 = (
-    validate(model, val_loader)
-)
+    val_metrics = validate(model, val_loader)
 
-    print(
-    f"\nPhase 1 | Epoch {epoch + 1}/{PHASE1_EPOCHS}\n"
-    f"Train | Loss: {train_loss:.4f} | Acc: {train_acc:.4f} | "
-    f"Precision: {train_precision:.4f} | "
-    f"Recall: {train_recall:.4f} | F1: {train_f1:.4f}\n"
-    f"Val   | Loss: {val_loss:.4f} | Acc: {val_acc:.4f} | "
-    f"Precision: {val_precision:.4f} | "
-    f"Recall: {val_recall:.4f} | F1: {val_f1:.4f}"
-)
+    val_f1 = val_metrics[4]
 
-    save_best_checkpoint(model, val_f1, phase=1, epoch=epoch + 1)
+    print_epoch_metrics(
+        phase=2,
+        epoch=epoch,
+        max_epochs=PHASE2_EPOCHS,
+        train_metrics=train_metrics,
+        val_metrics=val_metrics,
+        optimizer=optimizer,
+    )
+
+    save_best_checkpoint(
+        model, val_f1, phase=2, epoch=epoch
+    )
+
+    scheduler.step(val_f1)
 
     if early_stopping.step(val_f1):
         print("Early stopping triggered in Phase 2.")
@@ -410,7 +492,7 @@ for epoch in range(PHASE2_EPOCHS):
 
 
 # ============================================================
-# 12. LOAD BEST CHECKPOINT FROM EITHER PHASE
+# 13. LOAD BEST CHECKPOINT FROM EITHER PHASE
 # ============================================================
 
 checkpoint = torch.load(
@@ -425,14 +507,14 @@ model.eval()
 print("\n========== BEST CHECKPOINT ==========")
 print(f"Best validation Macro-F1: {checkpoint['best_val_f1']:.4f}")
 print(f"Best phase: {checkpoint['phase']}")
-print(f"Best epoch in that phase: {checkpoint['epoch']}")
+print(f"Best epoch in phase: {checkpoint['epoch']}")
 
 
 # ============================================================
-# 13. FINAL TEST PREDICTIONS
+# 14. FINAL TEST PREDICTIONS
 # ============================================================
 
-# The test set is evaluated only after model selection is complete.
+# Evaluate the test set only after training and model selection.
 all_labels = []
 all_predictions = []
 all_probabilities = []
@@ -455,7 +537,7 @@ y_prob = np.asarray(all_probabilities)
 
 
 # ============================================================
-# 14. CLASSIFICATION METRICS
+# 15. FINAL CLASSIFICATION METRICS
 # ============================================================
 
 accuracy = accuracy_score(y_true, y_pred)
@@ -463,6 +545,7 @@ accuracy = accuracy_score(y_true, y_pred)
 precision_macro = precision_score(
     y_true, y_pred, average="macro", zero_division=0
 )
+
 precision_weighted = precision_score(
     y_true, y_pred, average="weighted", zero_division=0
 )
@@ -470,6 +553,7 @@ precision_weighted = precision_score(
 recall_macro = recall_score(
     y_true, y_pred, average="macro", zero_division=0
 )
+
 recall_weighted = recall_score(
     y_true, y_pred, average="weighted", zero_division=0
 )
@@ -477,6 +561,7 @@ recall_weighted = recall_score(
 f1_macro = f1_score(
     y_true, y_pred, average="macro", zero_division=0
 )
+
 f1_weighted = f1_score(
     y_true, y_pred, average="weighted", zero_division=0
 )
@@ -492,7 +577,7 @@ print(f"Weighted F1-score  : {f1_weighted:.4f}")
 
 
 # ============================================================
-# 15. CLASSIFICATION REPORT
+# 16. CLASSIFICATION REPORT
 # ============================================================
 
 print("\n========== CLASSIFICATION REPORT ==========")
@@ -510,7 +595,7 @@ print(
 
 
 # ============================================================
-# 16. CONFUSION MATRIX
+# 17. CONFUSION MATRIX
 # ============================================================
 
 print("\n========== CONFUSION MATRIX ==========")
@@ -525,7 +610,7 @@ print(
 
 
 # ============================================================
-# 17. PER-CLASS AND OVERALL ROC-AUC
+# 18. ROC-AUC
 # ============================================================
 
 print("\n========== PER-CLASS ROC-AUC ==========")
@@ -540,10 +625,7 @@ for i, class_name in enumerate(class_names):
         )
         print(f"{class_name}: {auc:.4f}")
     else:
-        print(
-            f"{class_name}: Undefined "
-            "(missing positive or negative examples)"
-        )
+        print(f"{class_name}: Undefined (class missing in test set)")
 
 if len(np.unique(y_true)) == NUM_CLASSES:
     auc_macro = roc_auc_score(
@@ -563,16 +645,13 @@ if len(np.unique(y_true)) == NUM_CLASSES:
     )
 
     print(f"\nMacro ROC-AUC (OvR): {auc_macro:.4f}")
-    print(f"Weighted ROC-AUC    : {auc_weighted:.4f}")
+    print(f"Weighted ROC-AUC   : {auc_weighted:.4f}")
 else:
-    print(
-        "\nOverall multiclass ROC-AUC unavailable: "
-        "at least one class is missing from the test set."
-    )
+    print("Overall multiclass ROC-AUC unavailable.")
 
 
 # ============================================================
-# 18. SAVE FINAL TEST METRICS SUMMARY
+# 19. SAVE TEST METRICS
 # ============================================================
 
 metrics_path = (
