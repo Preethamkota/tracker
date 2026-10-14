@@ -26,29 +26,31 @@ torch.manual_seed(SEED)
 
 
 train_transform = transforms.Compose([
-    transforms.Lambda(lambda img: img.convert("RGB")),
+    transforms.Grayscale(num_output_channels=3),
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomRotation(10),
-    transforms.ColorJitter(
-        brightness=0.2,
-        contrast=0.2,
-        saturation=0.2
-    ),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+
     transforms.ToTensor(),
     transforms.RandomErasing(p=0.25),
+
     transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]
     )
 ])
 
-
 val_transform = transforms.Compose([
-    transforms.Lambda(lambda img: img.convert("RGB")),
-    transforms.Resize([IMAGE_SIZE,IMAGE_SIZE]),
+    transforms.Grayscale(num_output_channels=3),
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229, 0.224, 0.225])
+
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
 ])
 
 BASE_DIR = Path(__file__).resolve().parent.parent

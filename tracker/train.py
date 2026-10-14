@@ -6,6 +6,10 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -54,7 +58,7 @@ PHASE2_PATIENCE = 5
 MIN_DELTA = 0.001
 
 CHECKPOINT_PATH = (
-    Path(__file__).resolve().parent / "best_model.pth"
+    Path(__file__).resolve().parent / "best_model_grayscale.pth"
 )
 
 
@@ -160,6 +164,7 @@ def train_one_epoch(model, loader, optimizer, phase):
     total_samples = 0
     all_labels = []
     all_predictions = []
+    all_probabilities = []
 
     for images, labels in loader:
         images = images.to(device)
@@ -179,11 +184,13 @@ def train_one_epoch(model, loader, optimizer, phase):
         total_samples += batch_size
 
         predictions = logits.argmax(dim=1)
+        probabilities = torch.softmax(logits.detach(), dim=1)
 
         all_labels.extend(labels.detach().cpu().tolist())
         all_predictions.extend(
             predictions.detach().cpu().tolist()
         )
+        all_probabilities.extend(probabilities.cpu().tolist())
 
     avg_loss = total_loss / total_samples
 
@@ -210,7 +217,9 @@ def train_one_epoch(model, loader, optimizer, phase):
         zero_division=0,
     )
 
-    return avg_loss, accuracy, precision, recall, macro_f1
+    auc = multiclass_auc(all_labels, all_probabilities)
+
+    return avg_loss, accuracy, precision, recall, macro_f1, auc
 
 
 # ============================================================
@@ -225,6 +234,7 @@ def validate(model, loader):
 
     all_labels = []
     all_predictions = []
+    all_probabilities = []
 
     with torch.no_grad():
         for images, labels in loader:
@@ -240,9 +250,11 @@ def validate(model, loader):
             total_samples += batch_size
 
             predictions = logits.argmax(dim=1)
+            probabilities = torch.softmax(logits, dim=1)
 
             all_labels.extend(labels.cpu().tolist())
             all_predictions.extend(predictions.cpu().tolist())
+            all_probabilities.extend(probabilities.cpu().tolist())
 
     avg_loss = total_loss / total_samples
 
@@ -269,7 +281,73 @@ def validate(model, loader):
         zero_division=0,
     )
 
-    return avg_loss, accuracy, precision, recall, macro_f1
+    auc = multiclass_auc(all_labels, all_probabilities)
+
+    return avg_loss, accuracy, precision, recall, macro_f1, auc
+
+
+def multiclass_auc(labels, probabilities):
+    """Return macro one-vs-rest ROC-AUC, or NaN if a class is absent."""
+    labels_array = np.asarray(labels)
+    probabilities_array = np.asarray(probabilities)
+
+    if len(np.unique(labels_array)) < NUM_CLASSES:
+        return float("nan")
+
+    return roc_auc_score(
+        labels_array,
+        probabilities_array,
+        labels=list(range(NUM_CLASSES)),
+        multi_class="ovr",
+        average="macro",
+    )
+
+
+def plot_training_curves(history):
+    output_dir = Path(__file__).resolve().parent
+
+    fig, axis = plt.subplots(figsize=(10, 6))
+    axis.plot(history["epochs"], history["train_accuracy"], label="Training")
+    axis.plot(history["epochs"], history["val_accuracy"], label="Validation")
+    axis.plot(history["epochs"], history["test_accuracy"], label="Testing")
+    axis.set_title("Training, Validation, and Testing Accuracy")
+    axis.set_xlabel("Epoch")
+    axis.set_ylabel("Accuracy")
+    axis.set_ylim(0.0, 1.0)
+    axis.grid(True, alpha=0.3)
+    axis.legend()
+    fig.tight_layout()
+    accuracy_plot_path = output_dir / "accuracy_curves.png"
+    fig.savefig(accuracy_plot_path, dpi=150)
+    plt.close(fig)
+
+    fig, axis = plt.subplots(figsize=(10, 6))
+    axis.plot(history["epochs"], history["train_auc"], label="Training")
+    axis.plot(history["epochs"], history["val_auc"], label="Validation")
+    axis.plot(history["epochs"], history["test_auc"], label="Testing")
+    axis.set_title("Training, Validation, and Testing ROC-AUC")
+    axis.set_xlabel("Epoch")
+    axis.set_ylabel("Macro ROC-AUC (OvR)")
+    axis.set_ylim(0.0, 1.0)
+    axis.grid(True, alpha=0.3)
+    axis.legend()
+    fig.tight_layout()
+    auc_plot_path = output_dir / "auc_roc_curves.png"
+    fig.savefig(auc_plot_path, dpi=150)
+    plt.close(fig)
+
+    print(f"\nAccuracy graph saved to: {accuracy_plot_path}")
+    print(f"ROC-AUC graph saved to: {auc_plot_path}")
+
+
+def record_epoch_metrics(history, epoch, train_metrics, val_metrics, test_metrics):
+    history["epochs"].append(epoch)
+    history["train_accuracy"].append(train_metrics[1])
+    history["val_accuracy"].append(val_metrics[1])
+    history["test_accuracy"].append(test_metrics[1])
+    history["train_auc"].append(train_metrics[5])
+    history["val_auc"].append(val_metrics[5])
+    history["test_auc"].append(test_metrics[5])
 
 
 # ============================================================
@@ -313,11 +391,11 @@ def print_epoch_metrics(
     val_metrics,
     optimizer,
 ):
-    train_loss, train_acc, train_p, train_r, train_f1 = (
+    train_loss, train_acc, train_p, train_r, train_f1, train_auc = (
         train_metrics
     )
 
-    val_loss, val_acc, val_p, val_r, val_f1 = val_metrics
+    val_loss, val_acc, val_p, val_r, val_f1, val_auc = val_metrics
 
     print(
         f"\nPhase {phase} | Epoch {epoch}/{max_epochs}\n"
@@ -325,12 +403,14 @@ def print_epoch_metrics(
         f"Acc: {train_acc:.4f} | "
         f"Precision: {train_p:.4f} | "
         f"Recall: {train_r:.4f} | "
-        f"F1: {train_f1:.4f}\n"
+        f"F1: {train_f1:.4f} | "
+        f"AUC: {train_auc:.4f}\n"
         f"Val   | Loss: {val_loss:.4f} | "
         f"Acc: {val_acc:.4f} | "
         f"Precision: {val_p:.4f} | "
         f"Recall: {val_r:.4f} | "
-        f"F1: {val_f1:.4f}"
+        f"F1: {val_f1:.4f} | "
+        f"AUC: {val_auc:.4f}"
     )
 
     print(
@@ -344,6 +424,16 @@ def print_epoch_metrics(
 # ============================================================
 
 print("\n========== PHASE 1: FROZEN BACKBONE ==========")
+
+history = {
+    "epochs": [],
+    "train_accuracy": [],
+    "val_accuracy": [],
+    "test_accuracy": [],
+    "train_auc": [],
+    "val_auc": [],
+    "test_auc": [],
+}
 
 for param in model.features.parameters():
     param.requires_grad = False
@@ -376,6 +466,7 @@ for epoch in range(1, PHASE1_EPOCHS + 1):
     )
 
     val_metrics = validate(model, val_loader)
+    test_metrics = validate(model, test_loader)
 
     val_f1 = val_metrics[4]
 
@@ -386,6 +477,19 @@ for epoch in range(1, PHASE1_EPOCHS + 1):
         train_metrics=train_metrics,
         val_metrics=val_metrics,
         optimizer=optimizer,
+    )
+
+    record_epoch_metrics(
+        history,
+        epoch=len(history["epochs"]) + 1,
+        train_metrics=train_metrics,
+        val_metrics=val_metrics,
+        test_metrics=test_metrics,
+    )
+
+    print(
+        f"Test  | Acc: {test_metrics[1]:.4f} | "
+        f"AUC: {test_metrics[5]:.4f}"
     )
 
     save_best_checkpoint(
@@ -468,6 +572,7 @@ for epoch in range(1, PHASE2_EPOCHS + 1):
     )
 
     val_metrics = validate(model, val_loader)
+    test_metrics = validate(model, test_loader)
 
     val_f1 = val_metrics[4]
 
@@ -478,6 +583,19 @@ for epoch in range(1, PHASE2_EPOCHS + 1):
         train_metrics=train_metrics,
         val_metrics=val_metrics,
         optimizer=optimizer,
+    )
+
+    record_epoch_metrics(
+        history,
+        epoch=len(history["epochs"]) + 1,
+        train_metrics=train_metrics,
+        val_metrics=val_metrics,
+        test_metrics=test_metrics,
+    )
+
+    print(
+        f"Test  | Acc: {test_metrics[1]:.4f} | "
+        f"AUC: {test_metrics[5]:.4f}"
     )
 
     save_best_checkpoint(
@@ -492,7 +610,14 @@ for epoch in range(1, PHASE2_EPOCHS + 1):
 
 
 # ============================================================
-# 13. LOAD BEST CHECKPOINT FROM EITHER PHASE
+# 13. PLOT TRAINING CURVES
+# ============================================================
+
+plot_training_curves(history)
+
+
+# ============================================================
+# 14. LOAD BEST CHECKPOINT FROM EITHER PHASE
 # ============================================================
 
 checkpoint = torch.load(
@@ -511,7 +636,7 @@ print(f"Best epoch in phase: {checkpoint['epoch']}")
 
 
 # ============================================================
-# 14. FINAL TEST PREDICTIONS
+# 15. FINAL TEST PREDICTIONS
 # ============================================================
 
 # Evaluate the test set only after training and model selection.
@@ -537,7 +662,7 @@ y_prob = np.asarray(all_probabilities)
 
 
 # ============================================================
-# 15. FINAL CLASSIFICATION METRICS
+# 16. FINAL CLASSIFICATION METRICS
 # ============================================================
 
 accuracy = accuracy_score(y_true, y_pred)
@@ -577,7 +702,7 @@ print(f"Weighted F1-score  : {f1_weighted:.4f}")
 
 
 # ============================================================
-# 16. CLASSIFICATION REPORT
+# 17. CLASSIFICATION REPORT
 # ============================================================
 
 print("\n========== CLASSIFICATION REPORT ==========")
@@ -595,7 +720,7 @@ print(
 
 
 # ============================================================
-# 17. CONFUSION MATRIX
+# 18. CONFUSION MATRIX
 # ============================================================
 
 print("\n========== CONFUSION MATRIX ==========")
@@ -610,7 +735,7 @@ print(
 
 
 # ============================================================
-# 18. ROC-AUC
+# 19. ROC-AUC
 # ============================================================
 
 print("\n========== PER-CLASS ROC-AUC ==========")
@@ -651,7 +776,7 @@ else:
 
 
 # ============================================================
-# 19. SAVE TEST METRICS
+# 20. SAVE TEST METRICS
 # ============================================================
 
 metrics_path = (

@@ -1,8 +1,8 @@
 FINAL TEST METRICS
-Accuracy: 0.7748
-Macro Precision: 0.7788
-Weighted Precision: 0.7763
-Macro Recall: 0.7758
-Weighted Recall: 0.7748
-Macro F1-score: 0.7746
-Weighted F1-score: 0.7728
+Accuracy: 0.8167
+Macro Precision: 0.8303
+Weighted Precision: 0.8271
+Macro Recall: 0.8181
+Weighted Recall: 0.8167
+Macro F1-score: 0.8166
+Weighted F1-score: 0.8140
