@@ -33,3 +33,4 @@ runs/
 
 # Local datasets
 game_data/
+game_data_npy/
